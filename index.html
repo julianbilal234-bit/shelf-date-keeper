@@ -252,7 +252,11 @@ state.remindEdit=false;
 /* ---------- storage ---------- */
 const LS="sdk-local-v1";
 function lsLoad(){try{const v=JSON.parse(localStorage.getItem(LS)||"null");return v}catch(e){return null}}
-function lsSave(){try{localStorage.setItem(LS,JSON.stringify({items:state.items,sections:state.sections}))}catch(e){}}
+function lsSave(){try{localStorage.setItem(LS,JSON.stringify({items:state.items,sections:state.sections}))}catch(e){}idbMirror()}
+function idbOpen(){return new Promise((res,rej)=>{const r=indexedDB.open("sdk",1);r.onupgradeneeded=()=>r.result.createObjectStore("kv");r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+async function idbSet(k,v){try{const d=await idbOpen();await new Promise((res,rej)=>{const t=d.transaction("kv","readwrite");t.objectStore("kv").put(v,k);t.oncomplete=res;t.onerror=()=>rej(t.error)})}catch(_){}}
+async function idbGet(k){try{const d=await idbOpen();return await new Promise(res=>{const r=d.transaction("kv").objectStore("kv").get(k);r.onsuccess=()=>res(r.result);r.onerror=()=>res(undefined)})}catch(_){return undefined}}
+function idbMirror(){idbSet("list",{items:state.items.map(i=>({description:i.description,expiry:i.expiry,qty:i.qty,section:secName(i.section)})),remind:state.remind})}
 try{const w=localStorage.getItem("sdk-warn");if(w)state.warn=+w}catch(e){}
 $("#warnDays").value=String(state.warn);
 
@@ -352,7 +356,7 @@ function viewRow(i,isAll){
   const n=daysLeft(i.expiry),st=statusOf(i);
   const del=state.confirmDel===i.id
     ?`<button class="confirm" data-delyes="${esc(i.id)}">Delete</button><button data-delno="1">Keep</button>`
-    :`<button data-edit="${esc(i.id)}">Edit</button><button class="del" data-del="${esc(i.id)}">Remove</button>`;
+    :`<button data-cal="${esc(i.id)}" title="Add a reminder to Google Calendar">Remind</button><button data-edit="${esc(i.id)}">Edit</button><button class="del" data-del="${esc(i.id)}">Remove</button>`;
   return `<tr class="s-${st}">
     <td class="desc">${esc(i.description)}${i.example?'<span class="ex">Example</span>':""}</td>
     <td class="code">${esc(i.barcode)}</td>
@@ -388,7 +392,28 @@ function lookupBarcode(){
     if(k.section&&state.sections.find(s=>s.id===k.section))$("#f-sec").value=k.section;
     hint(`Known item: ${k.description}. ${known.length} batch${known.length>1?"es":""} already listed. Enter the new expiry date.`,"");
     $("#f-exp").focus();
-  }else{$("#f-desc").focus()}
+  }else{$("#f-desc").focus();if(!$("#f-desc").value)onlineLookup(code)}
+}
+async function fetchProduct(host,code){
+  const ctl=new AbortController(),t=setTimeout(()=>ctl.abort(),7000);
+  try{
+    const r=await fetch(`https://${host}/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,product_name_en,brands,quantity`,{signal:ctl.signal});
+    if(!r.ok)return null;const j=await r.json();if(!j||j.status!==1||!j.product)return null;
+    const p=j.product,name=String(p.product_name_en||p.product_name||"").trim(),brand=String(p.brands||"").split(",")[0].trim(),qty=String(p.quantity||"").replace(/\s+/g,"").trim();
+    if(!name&&!brand)return null;
+    const full=(brand&&!name.toLowerCase().includes(brand.toLowerCase())?brand+" ":"")+name;
+    return [full.trim(),qty].filter(Boolean).join(" ");
+  }catch(_){return null}finally{clearTimeout(t)}
+}
+async function onlineLookup(code){
+  if(!/^\d{8,14}$/.test(code))return;
+  if(!navigator.onLine){hint("Offline, so the name can't be looked up. Type the description.","");return}
+  hint("Looking up the product name…");
+  let found=await fetchProduct("world.openfoodfacts.org",code);
+  if(!found)found=await fetchProduct("world.openproductsfacts.org",code);
+  if(bcIn.value.trim()!==code)return;
+  if(found&&!$("#f-desc").value){$("#f-desc").value=found;hint("Name filled in from the product database. Check it, then add the expiry date.","ok");$("#f-exp").focus()}
+  else if(!found)hint("Product not found online. Type the description once and the app will remember it.","");
 }
 bcIn.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();lookupBarcode()}});
 bcIn.addEventListener("change",lookupBarcode);
@@ -414,6 +439,8 @@ document.addEventListener("click",async e=>{
   if(d.chip){state.status=d.chip;render();return}
   if(d.st){state.status=d.st;state.active="all";render();$("#rows").scrollIntoView({behavior:"smooth",block:"start"});return}
   if(d.sort){state.sort=d.sort;render();return}
+  if(d.cal){calReminder(d.cal);return}
+  if(b.id==="alertsOn"){turnOnAlerts();return}
   if(d.edit){state.editing=d.edit;state.confirmDel=null;render();return}
   if(d.cancel){state.editing=null;render();return}
   if(d.del){state.confirmDel=d.del;render();return}
@@ -503,14 +530,60 @@ function renderDue(){
     ?(state.remindEdit
       ?`<div class="due-days"><span class="due-note">Phone alert for items</span>${REMIND_CHOICES.map(([d,l])=>`<button class="chip" aria-pressed="${days.includes(d)}" data-rday="${d}">${l}${d?" before":""}</button>`).join("")}<button class="linkbtn" id="remindDone">Done</button></div>`
       :`<div class="due-note">${days.length?`Phone alert each morning (about 7:40) for items ${esc(daysText)}.`:"Phone alerts are off."} <button class="linkbtn" id="remindEdit">Change</button></div>`)
-    :`<div class="due-note">Check this list each morning to see what is expiring.</div>`;
+    :localAlertLine(days,daysText);
   box.innerHTML=`<div class="due-head"><h3>Coming up</h3></div>${rows}${alertLine}`;
 }
 let remindSaving=Promise.resolve();
 async function toggleRemindDay(d){
   const days=new Set(state.remind.days||[]);days.has(d)?days.delete(d):days.add(d);
   state.remind={days:[...days].sort((a,b)=>b-a)};renderDue();
+  if(state.mode!=="db"){try{localStorage.setItem("sdk-remind",JSON.stringify(state.remind))}catch(_){}idbMirror();return}
   if(state.mode==="db"){remindSaving=remindSaving.then(()=>db.doc("settings/reminders").set(state.remind)).catch(()=>hint("Could not save the reminder choice. Try again.","err"))}
+}
+
+/* ---------- local phone alerts + calendar ---------- */
+function localAlertLine(days,daysText){
+  const chooser=`<div class="due-days"><span class="due-note">Alert for items</span>${REMIND_CHOICES.map(([d,l])=>`<button class="chip" aria-pressed="${days.includes(d)}" data-rday="${d}">${l}${d?" before":""}</button>`).join("")}<button class="linkbtn" id="remindDone">Done</button></div>`;
+  if(state.remindEdit)return chooser;
+  if(!("Notification" in window)||!("serviceWorker" in navigator))return `<div class="due-note">This browser can't show phone alerts. Tap Remind on an item to put it in your calendar.</div>`;
+  if(Notification.permission==="denied")return `<div class="due-note">Phone alerts are blocked. Turn on notifications for this app in your phone's Settings, then reopen it.</div>`;
+  if(Notification.permission!=="granted")return `<div class="due-note"><button class="btn small" id="alertsOn">Turn on phone alerts</button> Get a daily alert for items ${esc(daysText||"close to expiry")}.</div>`;
+  return `<div class="due-note">${days.length?`Phone alert once a day for items ${esc(daysText)}.`:"Phone alerts are off."} <button class="linkbtn" id="remindEdit">Change</button></div>`;
+}
+function alertItems(){
+  const days=state.remind.days||[];
+  return state.items.filter(i=>{const n=daysLeft(i.expiry);return n!==null&&(n<0||days.includes(n))}).sort((a,b)=>a.expiry.localeCompare(b.expiry));
+}
+async function turnOnAlerts(){
+  try{
+    const p=await Notification.requestPermission();
+    if(p!=="granted"){hint("Alerts not allowed. You can still tap Remind on an item to use your calendar.","err");renderDue();return}
+    const reg=await navigator.serviceWorker.ready;
+    if(reg.periodicSync){try{await reg.periodicSync.register("expiry-check",{minInterval:12*60*60*1000})}catch(_){}}
+    idbMirror();hint("Phone alerts are on.","ok");renderDue();checkAlertsNow(true);
+  }catch(_){hint("Couldn't turn on alerts on this phone.","err")}
+}
+async function checkAlertsNow(force){
+  if(state.mode==="db"||!("Notification" in window)||Notification.permission!=="granted")return;
+  const today=todayStr();if(!force&&(await idbGet("lastAlert"))===today)return;
+  const list=alertItems();if(!list.length)return;
+  const reg=await navigator.serviceWorker.ready.catch(()=>null);if(!reg)return;
+  const lines=list.slice(0,6).map(i=>`${i.description}: ${statusText(daysLeft(i.expiry)).toLowerCase()}`);
+  if(list.length>6)lines.push(`+${list.length-6} more`);
+  await reg.showNotification(`${list.length} item${list.length>1?"s":""} to check`,{body:lines.join("\n"),icon:"icon-192.png",badge:"icon-192.png",tag:"expiry"});
+  idbSet("lastAlert",today);
+}
+function calReminder(id){
+  const i=state.items.find(x=>x.id===id);if(!i||!i.expiry)return;
+  const [y,m,d]=i.expiry.split("-").map(Number);
+  const when=new Date(y,m-1,d-state.warn),now=new Date();now.setHours(0,0,0,0);
+  const day=when<now?now:when;
+  const f=x=>x.getFullYear()+String(x.getMonth()+1).padStart(2,"0")+String(x.getDate()).padStart(2,"0");
+  const next=new Date(day);next.setDate(next.getDate()+1);
+  const title=`Check expiry: ${i.description}`;
+  const details=`${i.description}\nExpires: ${fmtDate(i.expiry)}\nSection: ${secName(i.section)}\nQty: ${i.qty??""}\nBarcode: ${i.barcode}`;
+  const url=`https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${f(day)}/${f(next)}&details=${encodeURIComponent(details)}`;
+  window.open(url,"_blank");
 }
 
 /* ---------- read name and size from a label photo ---------- */
@@ -574,6 +647,8 @@ function startLocal(){
     ];
     lsSave();
   }
+  try{const r=JSON.parse(localStorage.getItem("sdk-remind")||"null");if(r&&Array.isArray(r.days))state.remind={days:r.days.map(Number)}}catch(_){}
+  idbMirror();setTimeout(()=>checkAlertsNow(false),1500);
   $("#saveMode").textContent="Saved on this phone only. Tap Download CSV now and then to keep a backup.";
   render();
 }
