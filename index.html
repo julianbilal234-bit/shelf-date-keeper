@@ -704,7 +704,7 @@ function renderAiKey(){
   const k=getKey();
   if(keyEdit||!k){
     box.innerHTML=`<div><b>AI label reader</b> (optional): paste a free Google AI key to read labels accurately. It is saved on this phone only. <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get a free key</a></div>
-    <form id="keyForm"><input id="keyIn" type="password" autocomplete="off" placeholder="Paste key (starts with AIza…)" value="${esc(k)}"><button class="btn small">Save key</button>${k?`<button type="button" class="btn ghost small" id="keyCancel">Cancel</button>`:""}</form>`;
+    <form id="keyForm"><input id="keyIn" type="password" autocomplete="off" placeholder="Paste key (starts with AIza or AQ.)" value="${esc(k)}"><button class="btn small">Save key</button>${k?`<button type="button" class="btn ghost small" id="keyCancel">Cancel</button>`:""}</form>`;
   }else{
     box.innerHTML=`<div><b>AI label reader is on.</b> Key ending …${esc(k.slice(-4))} is saved on this phone. <button class="linkbtn" id="keyChange">Change</button> · <button class="linkbtn" id="keyRemove">Remove</button></div>`;
   }
@@ -717,7 +717,7 @@ $("#aikey").addEventListener("click",e=>{
 });
 $("#aikey").addEventListener("submit",e=>{
   e.preventDefault();const v=$("#keyIn").value.trim();
-  if(!/^AIza[0-9A-Za-z_\-]{20,}$/.test(v)){hint("That doesn't look like a Google AI key. It should start with AIza.","err");return}
+  if(!/^(AIza|AQ\.)[0-9A-Za-z_.\-]{20,}$/.test(v)){hint("That doesn't look like a Google AI key. It should start with AIza or AQ. and have no spaces.","err");return}
   try{localStorage.setItem(GKEY,v)}catch(_){}keyEdit=false;renderAiKey();hint("AI key saved. Take a label photo to try it.","ok");
 });
 async function photoB64(file){
