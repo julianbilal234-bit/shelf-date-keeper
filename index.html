@@ -74,6 +74,8 @@ h1 small{display:block;font-family:var(--f-body);font-weight:500;font-size:.78re
 .aikey form{display:flex;gap:6px;flex-wrap:wrap}
 .aikey input{flex:1 1 220px;min-width:0;height:36px;border:1px solid var(--line);border-radius:6px;background:var(--surface);padding:0 10px;font-family:var(--f-mono);font-size:.85rem}
 .aikey a{color:var(--accent)}
+.import-msg{flex-basis:100%;font-size:.88rem;padding:10px 12px;border-radius:12px;background:var(--field)}
+.import-msg.ok{background:var(--good-bg);color:var(--good)} .import-msg.err{background:var(--bad-bg);color:var(--bad)}
 .pick-note{font-size:.8rem;color:var(--muted);margin-top:8px}
 
 /* tabs */
@@ -217,7 +219,7 @@ header.top h1{font-size:1.6rem}
 .addcard{border-top:5px solid var(--accent)}
 .listtitle{margin:22px 0 0}
 footer.card{margin-bottom:30px;padding-block:14px}
-footer.card .cardtitle{flex-basis:100%;margin-bottom:2px}
+footer.card .cardtitle{flex-basis:100%;margin-bottom:2px;color:var(--ink)}
 .rowact button{padding:7px 12px;font-size:.88rem;border-radius:7px}
 @media (max-width:760px){
   .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -366,7 +368,8 @@ th{background:var(--field)}
   <footer class="card">
     <h2 class="cardtitle">Downloads &amp; settings</h2>
     <span id="saveMode">Loading your stock list…</span>
-    <span class="exp-btns"><button class="btn ghost small" id="exportBtn" hidden>Download CSV</button> <button class="btn ghost small" id="exportAllBtn" hidden>Download all</button> <button class="btn ghost small" id="barcodeTxtBtn" hidden>Barcodes (.txt)</button></span>
+    <span class="exp-btns"><button class="btn ghost small" id="exportBtn" hidden>Download CSV</button> <button class="btn ghost small" id="exportAllBtn" hidden>Download all</button> <button class="btn ghost small" id="barcodeTxtBtn" hidden>Barcodes (.txt)</button> <button class="btn ghost small" id="importBtn">Import list (CSV)</button><input type="file" id="importFile" accept=".csv,text/csv,text/comma-separated-values,application/vnd.ms-excel" hidden></span>
+    <div class="import-msg" id="importMsg" hidden></div>
     <div class="aikey" id="aikey"></div>
   </footer>
 </main>
@@ -649,6 +652,7 @@ document.addEventListener("click",async e=>{
   if(b.id==="exportBtn"){exportCsv(false);return}
   if(b.id==="exportAllBtn"){exportCsv(true);return}
   if(b.id==="barcodeTxtBtn"){exportBarcodes();return}
+  if(b.id==="importBtn"){$("#importFile").click();return}
 });
 document.addEventListener("submit",async e=>{
   if(e.target.id!=="secForm")return;e.preventDefault();
@@ -1028,6 +1032,87 @@ async function exportCsv(everything){
   const fn=`stock-expiry-${tag?tag+"-":""}${todayStr()}.csv`;if(downloads){try{await downloads.save({filename:fn,data:csv});}catch(_){hint("Download was cancelled.","")}return}
   const a=document.createElement("a");a.href=URL.createObjectURL(new Blob(["\ufeff"+csv],{type:"text/csv"}));a.download=fn;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
 }
+
+/* ---------- import a saved CSV list ---------- */
+function parseCsv(text){
+  text=text.replace(/^\ufeff/,"");
+  const delim=(text.split("\n")[0].match(/;/g)||[]).length>(text.split("\n")[0].match(/,/g)||[]).length?";":",";
+  const rows=[];let row=[],f="",q=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){if(c==='"'){if(text[i+1]==='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c==='"')q=true;
+    else if(c===delim){row.push(f);f=""}
+    else if(c==="\n"||c==="\r"){if(c==="\r"&&text[i+1]==="\n")i++;row.push(f);rows.push(row);row=[];f=""}
+    else f+=c;
+  }
+  if(f!==""||row.length){row.push(f);rows.push(row)}
+  return rows.filter(r=>r.some(v=>v.trim()!==""));
+}
+function toIsoDate(v){
+  v=String(v||"").trim();if(!v)return"";
+  let m=v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if(m)return `${m[1]}-${m[2].padStart(2,"0")}-${m[3].padStart(2,"0")}`;
+  m=v.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/);
+  if(m){let a=+m[1],b=+m[2],y=+m[3];if(y<100)y+=2000;let d,mo;
+    if(a>12){d=a;mo=b}else if(b>12){mo=a;d=b}else{d=a;mo=b}
+    if(mo<1||mo>12||d<1||d>31)return"";
+    return `${y}-${String(mo).padStart(2,"0")}-${String(d).padStart(2,"0")}`}
+  const t=Date.parse(v);if(!isNaN(t)){const x=new Date(t);return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,"0")}-${String(x.getDate()).padStart(2,"0")}`}
+  return"";
+}
+function importNote(html,kind){const el=$("#importMsg");el.hidden=false;el.className="import-msg "+(kind||"");el.innerHTML=html}
+$("#importFile").addEventListener("change",async e=>{
+  const f=e.target.files&&e.target.files[0];e.target.value="";if(!f)return;
+  let rows;try{rows=parseCsv(await f.text())}catch(_){importNote("Couldn't read that file. Pick a CSV file downloaded from this app.","err");return}
+  if(rows.length<2){importNote("That file has no items in it.","err");return}
+  const head=rows[0].map(x=>x.trim().toLowerCase());
+  const col=n=>head.findIndex(x=>x===n||x.startsWith(n));
+  const ci={sec:col("section"),desc:col("description"),bc:col("barcode"),exp:col("expiry"),qty:col("qty"),rem:col("removed")};
+  if(ci.desc<0||ci.exp<0){importNote("This doesn't look like a list from this app. It needs Description and Expiry columns.","err");return}
+  // drop the sample items if they are all that's in the list
+  if(state.items.length&&state.items.every(i=>i.example)){
+    if(state.mode==="db"){for(const i of state.items){try{await removeItem(i.id)}catch(_){}}}
+    state.items=[];
+  }
+  const newSecs=[];
+  const findSec=name=>{
+    name=String(name||"").trim();if(!name||name==="Unsorted")return state.sections[0]?state.sections[0].id:"";
+    let s=state.sections.concat(newSecs).find(x=>x.name.toLowerCase()===name.toLowerCase());
+    if(!s){s={id:slug(name),name,order:Math.max(0,...state.sections.concat(newSecs).map(x=>x.order||0))+1};newSecs.push(s)}
+    return s.id;
+  };
+  const key=i=>[String(i.barcode||"").trim(),i.expiry,i.section,i.removedAt?"r":""].join("|");
+  const have=new Set(state.items.map(key));
+  const add=[];let skipped=0,bad=0,sci=0;
+  for(const r of rows.slice(1)){
+    const g=k=>ci[k]>=0?String(r[ci[k]]??"").trim():"";
+    const desc=g("desc"),expiry=toIsoDate(g("exp"));
+    if(!desc||!expiry){bad++;continue}
+    let bc=g("bc");if(/e\+/i.test(bc))sci++;
+    const it={id:uid(),barcode:bc,description:desc,section:findSec(g("sec")),expiry,qty:Number(g("qty"))||0,addedAt:new Date().toISOString()};
+    const rem=toIsoDate(g("rem"));if(rem)it.removedAt=rem+"T12:00:00.000Z";
+    const k=key(it);if(have.has(k)){skipped++;continue}
+    have.add(k);add.push(it);
+  }
+  if(!add.length){importNote(skipped?`Nothing new to add. All ${skipped} item${skipped>1?"s are":" is"} already in the app.`:"No items could be read from that file.",skipped?"ok":"err");render();return}
+  importNote(`Adding ${add.length} item${add.length>1?"s":""}…`);
+  try{
+    if(state.mode==="db"){
+      for(const s of newSecs)await db.collection("sections").doc(s.id).set(s);
+      for(const it of add)await db.collection("items").doc(it.id).set(it);
+    }else{
+      state.sections.push(...newSecs);state.items.push(...add);lsSave();
+    }
+  }catch(_){importNote("Something went wrong while adding. Some items may not have been added. Try importing the same file again; items already added will be skipped.","err");render();return}
+  state.active="all";state.status="all";render();
+  const parts=[`<b>Added ${add.length} item${add.length>1?"s":""}.</b>`];
+  if(newSecs.length)parts.push(`New section${newSecs.length>1?"s":""}: ${newSecs.map(s=>esc(s.name)).join(", ")}.`);
+  if(skipped)parts.push(`Skipped ${skipped} already in the app.`);
+  if(bad)parts.push(`${bad} row${bad>1?"s":""} had no description or date and ${bad>1?"were":"was"} left out.`);
+  if(sci)parts.push(`${sci} barcode${sci>1?"s look":" looks"} damaged (like 6.00E+12). That happens when a CSV is saved from Excel. Fix ${sci>1?"them":"it"} with Edit.`);
+  importNote(parts.join(" "),"ok");
+});
 
 /* ---------- boot ---------- */
 function startLocal(){
